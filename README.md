@@ -150,16 +150,3 @@ TreatmentRepository: - findByAnimal_IdOrderByPerformedAtAsc
 -   Tratamientos realizados en un centro determinado.
 -   Tratamientos realizados por especialistas con una experiencia
     específica utilizando relaciones N:M.
-
-## Tecnologías utilizadas
-
--   Java 21
--   Spring Boot
--   Spring Data JPA
--   Hibernate
--   PostgreSQL
--   Flyway
--   Maven
--   Docker
--   Testcontainers
--   JUnit 5
