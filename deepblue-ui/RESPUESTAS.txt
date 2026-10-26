@@ -1,0 +1,121 @@
+LABORATORIO DEEPBLUE RESCUE — CONSUMO DEL API REST CON REACT Y TANSTACK QUERY
+Respuestas a los "Para pensar" y observaciones de las pruebas
+
+Datos de prueba usados (cargados por la migración db/seed/V3_1__seed_demo_data.sql del backend):
+- caseCode: DBR-001 (ADMITTED), DBR-003 (UNDER_EVALUATION), DBR-004 (IN_REHABILITATION)
+- animalCode: ANM-001, ANM-003, ANM-004
+- specialistCode: SP-100 (activo), SP-300 (inactivo)
+
+==================================================================
+CHECKPOINT 1
+¿Por qué la URL del fetch será /api/... y no http://localhost:8080/api/...?
+
+Porque la app se sirve desde http://localhost:5173 y una URL relativa (/api/...) se
+resuelve contra ese mismo origen. El navegador ve una petición same-origin, así que no
+aplica la política CORS. El servidor de desarrollo de Vite intercepta todo lo que empieza
+por /api y lo reenvía (proxy) a http://localhost:8080. Si usáramos la URL absoluta del
+backend, la petición sería cross-origin y el navegador la bloquearía porque Spring Boot no
+envía cabeceras Access-Control-Allow-Origin. Además, la URL relativa no deja "quemado" el
+host del backend en el código: en producción basta con servir el frontend detrás del mismo
+dominio o configurar un proxy inverso.
+
+==================================================================
+CHECKPOINT 2
+¿Por qué request lanza el error en lugar de devolverlo?
+
+TanStack Query decide el estado de una query según la promesa que devuelve queryFn: si se
+resuelve, la trata como éxito (data); si se rechaza, la trata como error (isError = true y
+error = el valor lanzado). fetch NO rechaza la promesa con respuestas 4xx/5xx, solo con
+fallos de red, por eso request revisa response.ok y lanza un ApiError. Si devolviera el
+error como un valor normal, TanStack Query lo guardaría en data como si fuera un éxito:
+isError sería false, no se dispararían onError ni los estados de error de las mutaciones,
+y cada componente tendría que revisar manualmente si data es un error.
+
+==================================================================
+CHECKPOINT 3
+¿Qué pasaría si queryKey fuera solo ['rescue-cases'] sin status?
+
+La queryKey es el identificador de la caché. Sin status, todos los filtros compartirían una
+única entrada de caché. Al cambiar el select, la clave no cambiaría, así que TanStack Query
+no lanzaría una nueva consulta: seguiría mostrando los casos del primer estado consultado
+(por ejemplo ADMITTED aunque se elija RELEASED). Además se perdería la caché por estado:
+no se podría volver a un filtro anterior sin pedirlo otra vez, y si se forzara un refetch,
+los datos de un estado sobrescribirían los de otro. Incluir los parámetros de queryFn en la
+queryKey es la regla para que cada combinación tenga su propia caché.
+
+==================================================================
+CHECKPOINT 4
+¿Para qué sirve enabled? ¿Qué pasaría sin él si animalCode fuera undefined?
+
+enabled controla si la query se ejecuta automáticamente. Con enabled = false la query no
+llama a queryFn; queda en estado pending sin hacer peticiones hasta que la condición sea
+true. Sin él, si animalCode fuera undefined (por ejemplo un caso sin animal asignado), se
+ejecutarían de inmediato tres peticiones a /api/animals/undefined,
+/api/animals/undefined/treatments y /api/animals/undefined/treatment-eligibility. El backend
+respondería 404 "Animal not found: undefined", se mostrarían errores sin sentido y se
+guardarían en caché entradas con clave ['animal', undefined]. enabled sirve para consultas
+dependientes: solo se consulta cuando ya existe el dato necesario.
+
+==================================================================
+CHECKPOINT 5
+¿Qué hace invalidateQueries({ queryKey: ['rescue-cases'] }) y por qué afecta a todas las
+listas por estado?
+
+Marca como obsoletas (stale) las queries cuya clave coincide y vuelve a consultar de
+inmediato las que están activas en pantalla; las inactivas se refrescarán la próxima vez
+que se usen. La coincidencia es por prefijo: ['rescue-cases'] coincide con
+['rescue-cases', 'ADMITTED'], ['rescue-cases', 'UNDER_EVALUATION'], etc. Por eso afecta a
+todas las listas. Es lo correcto, porque un cambio de estado modifica al menos dos listas
+a la vez: el caso sale de la lista del estado anterior y entra en la del nuevo.
+
+Observaciones de las pruebas del Paso 5:
+| Prueba                          | Resultado observado
+| DBR-001 ADMITTED -> UNDER_EVALUATION | 200. El caso desaparece de la lista ADMITTED sin
+|                                 | recargar la página; el detalle muestra Estado:
+|                                 | UNDER_EVALUATION y al filtrar por UNDER_EVALUATION aparece.
+| DBR-002 ADMITTED -> RELEASED    | 409. Se muestra en rojo "Error 409: Invalid status
+|                                 | transition from ADMITTED to RELEASED". La aplicación sigue
+|                                 | funcionando y el caso permanece en ADMITTED.
+
+==================================================================
+CHECKPOINT 6
+¿Por qué usamos useReducer y no un useState por campo?
+
+Porque el formulario es un único estado con varios campos relacionados. Con useReducer:
+- un solo handleChange sirve para todos los inputs usando e.target.name;
+- las transiciones están centralizadas en formReducer ('field' y 'reset'), lo que las hace
+  explícitas y fáciles de probar como función pura;
+- reiniciar el formulario es una sola acción (dispatch({ type: 'reset' })) en vez de
+  llamar cuatro setters;
+- agregar un campo nuevo solo requiere tocar initialState y el JSX.
+Con un useState por campo habría cuatro estados, cuatro setters y lógica repetida.
+
+¿Por qué invalidateQueries usa la clave ['animal', animalCode] sin más sufijos?
+
+Porque la invalidación es por prefijo. ['animal', animalCode] coincide con las tres queries
+del animal: ['animal', code], ['animal', code, 'treatments'] y
+['animal', code, 'eligibility']. Registrar un tratamiento puede cambiar la tabla de
+tratamientos y la elegibilidad, así que conviene refrescar todo lo del animal con una sola
+llamada. Si se agregara un sufijo ('treatments'), la elegibilidad quedaría desactualizada.
+Al incluir animalCode no se tocan las cachés de otros animales.
+
+Observaciones de las pruebas del Paso 6 (animal ANM-004, caso DBR-004 IN_REHABILITATION):
+| Prueba                                | Resultado observado
+| Descripción de menos de 10 caracteres | 400. "Request validation failed" y en la lista:
+|                                       | "description: Description must have at least 10
+|                                       | characters".
+| specialistCode vacío                  | 400. "specialistCode: Specialist code is required".
+| Fecha en el futuro                    | 400. "performedAt: Treatment date cannot be in the
+|                                       | future".
+| Fecha vacía                           | 400. datetime-local envía "", Jackson lo convierte en
+|                                       | null y la validación responde "performedAt: Required
+|                                       | treatment date". (Si el formato no se pudiera leer, el
+|                                       | handler responde 400 "Malformed JSON request or invalid
+|                                       | field value" sin details.)
+| specialistCode = SP-999 (inexistente) | 404. "Error 404: Specialist not found: SP-999".
+| Datos válidos (SP-100, fecha pasada,  | 201. Aparece "Tratamiento registrado ✔", la fila nueva
+| descripción >= 10 caracteres)         | se agrega a la tabla sin recargar y el formulario se
+|                                       | limpia. En Network se ven de nuevo GET .../treatments y
+|                                       | GET .../treatment-eligibility (invalidación por prefijo).
+| Extra: SP-300 (especialista inactivo) | 409. "Cannot register treatment because the specialist
+|                                       | SP-300 is not active."
